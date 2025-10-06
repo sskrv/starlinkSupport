@@ -1,8 +1,8 @@
 package org.example.logic;
 
 import org.example.config.BotConfig;
-import org.example.db.DatabaseManager;
 import org.example.db.User;
+import org.example.db.UserRepository;
 import org.example.yookassa.YooKassaPayment;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,6 +19,7 @@ import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.Keyboard
 import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.KeyboardRow;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -31,16 +32,16 @@ public class BotLogic extends TelegramLongPollingBot {
     private static final Logger logger = LoggerFactory.getLogger(BotLogic.class);
 
     private final BotConfig botConfig;
-    private final DatabaseManager dbManager;
     private final YooKassaPayment yooKassaPayment;
+    private final UserRepository userRepository;
 
     private final Map<Long, Long> adminReplyTarget = new ConcurrentHashMap<>();
     private final Map<Long, Boolean> waitingForCustomQuestion = new ConcurrentHashMap<>();
 
-    public BotLogic(BotConfig botConfig, DatabaseManager dbManager, YooKassaPayment yooKassaPayment) {
+    public BotLogic(BotConfig botConfig, UserRepository userRepository, YooKassaPayment yooKassaPayment) {
         super(botConfig.getToken());
         this.botConfig = botConfig;
-        this.dbManager = dbManager;
+        this.userRepository = userRepository;
         this.yooKassaPayment = yooKassaPayment;
         logger.info("BotLogic initialized");
     }
@@ -107,10 +108,8 @@ public class BotLogic extends TelegramLongPollingBot {
         long chatId = message.getChatId();
         String text = message.getText();
 
-        // ДОБАВЛЯЕМ ПРОВЕРКУ НА ОЖИДАНИЕ КАСТОМНОГО ВОПРОСА
         if (waitingForCustomQuestion.getOrDefault(chatId, false)) {
             if ("/start".equals(text)) {
-                // Если пользователь нажал /start, сбрасываем состояние и показываем меню
                 waitingForCustomQuestion.remove(chatId);
                 showMainMenu(chatId, "Добро пожаловать! По какому вопросу обращаетесь?");
                 return;
@@ -124,7 +123,6 @@ public class BotLogic extends TelegramLongPollingBot {
             return;
         }
 
-        // ОСТАЛЬНОЙ КОД МЕТОДА ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ
         if ("/start".equals(text)) {
             showMainMenu(chatId, "Добро пожаловать! По какому вопросу обращаетесь?");
             return;
@@ -140,7 +138,8 @@ public class BotLogic extends TelegramLongPollingBot {
         String phoneNumber = message.getContact().getPhoneNumber();
 
         try {
-            dbManager.saveUserPhoneNumber(chatId, phoneNumber);
+            User user = userRepository.findById(chatId).orElse(new User(chatId));
+            user.setPhone(phoneNumber);
             sendMessage(chatId, "✅ Спасибо, ваш контакт сохранен!");
         } catch (Exception e) {
             logger.error("Error saving user phone number for user {}: {}", chatId, e.getMessage(), e);
@@ -178,7 +177,6 @@ public class BotLogic extends TelegramLongPollingBot {
             return;
         }
 
-        // Обработка кнопки "Продолжить без номера"
         if (callbackData.startsWith("skip_phone_and_send:")) {
             RequestContext context = pendingRequests.remove(chatId);
             if (context != null) {
@@ -217,18 +215,15 @@ public class BotLogic extends TelegramLongPollingBot {
     }
 
     private void handleUserRequest(long chatId, String username, String requestText) throws TelegramApiException {
-        // Проверяем, есть ли у пользователя сохраненный телефон
-        Optional<User> userOpt = dbManager.findUserById(chatId);
+        Optional<User> userOpt = userRepository.findById(chatId);
 
         boolean hasPhone = userOpt.isPresent() &&
                 userOpt.get().getPhone() != null &&
                 !userOpt.get().getPhone().trim().isEmpty();
 
         if (!hasPhone) {
-            // Предлагаем поделиться номером, но не требуем обязательно
             showPhoneRequestOptions(chatId, requestText, username);
         } else {
-            // Пользователь уже предоставил номер телефона
             forwardUserActionToAdmin(chatId, username, requestText);
             sendMessage(chatId, "Ваш запрос отправлен администратору. Скоро с вами свяжутся.");
         }
@@ -242,17 +237,15 @@ public class BotLogic extends TelegramLongPollingBot {
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(List.of(createButton("📱 Поделиться номером", "share_phone")));
         rows.add(List.of(createButton("⏭️ Продолжить без номера", "skip_phone_and_send:" +
-                System.currentTimeMillis()))); // Добавляем timestamp для уникальности
+                System.currentTimeMillis())));
 
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup(rows);
         message.setReplyMarkup(markup);
         execute(message);
 
-        // Сохраняем контекст запроса для обработки после выбора пользователя
         saveRequestContext(chatId, requestText, username);
     }
 
-    // Временное хранение контекста запросов
     private final Map<Long, RequestContext> pendingRequests = new ConcurrentHashMap<>();
 
     private static class RequestContext {
@@ -270,17 +263,13 @@ public class BotLogic extends TelegramLongPollingBot {
     private void saveRequestContext(long chatId, String requestText, String username) {
         pendingRequests.put(chatId, new RequestContext(requestText, username));
 
-        // Очищаем старые контексты (старше 10 минут)
         long cutoff = System.currentTimeMillis() - 600000; // 10 минут
         pendingRequests.entrySet().removeIf(entry -> entry.getValue().timestamp < cutoff);
     }
 
-    // Обновляем основной handleCallbackQuery, добавляя новую логику
-    // (Заменяем существующий метод на обновленную версию)
 
     private void forwardUserActionToAdmin(long userId, String username, String requestText) {
-        // Используем Optional для безопасного получения телефона
-        String phone = dbManager.findUserById(userId)
+        String phone = userRepository.findById(userId)
                 .map(User::getPhone)
                 .filter(p -> p != null && !p.trim().isEmpty())
                 .orElse("не указан");
@@ -306,7 +295,6 @@ public class BotLogic extends TelegramLongPollingBot {
                 createButton("Активация устройства", "activate_device")
         ));
         rows.add(List.of(createButton("Покупка подписки", "buy_subscription")));
-        // ДОБАВЛЯЕМ НОВУЮ КНОПКУ
         rows.add(List.of(createButton("❓ Другой вопрос", "other_question")));
 
         markup.setKeyboard(rows);
@@ -364,7 +352,21 @@ public class BotLogic extends TelegramLongPollingBot {
             switch (status) {
                 case SUCCEEDED -> {
                     try {
-                        dbManager.updateSubscription(chatId);
+                        User user = userRepository.findById(chatId).orElse(new User(chatId));
+
+                        final int SUBSCRIPTION_DAYS = 30;
+                        LocalDateTime currentExpiry = user.getSubscriptionExpiryDate();
+                        LocalDateTime newExpiry;
+
+                        if (currentExpiry != null && currentExpiry.isAfter(LocalDateTime.now())) {
+                            newExpiry = currentExpiry.plusDays(SUBSCRIPTION_DAYS);
+                        } else {
+                            newExpiry = LocalDateTime.now().plusDays(SUBSCRIPTION_DAYS);
+                        }
+
+                        user.setSubscriptionExpiryDate(newExpiry);
+
+                        userRepository.save(user);
                         sendMessage(chatId, "✅ Оплата прошла успешно! Ваша подписка активна.");
 
                         String adminNotification = String.format(
@@ -373,7 +375,6 @@ public class BotLogic extends TelegramLongPollingBot {
                         );
                         forwardUserActionToAdmin(chatId, username, adminNotification);
 
-                        // Убираем кнопки после успешной оплаты
                         removeInlineKeyboard(chatId, messageId);
                     } catch (Exception e) {
                         logger.error("Error updating subscription for user {}: {}", chatId, e.getMessage(), e);

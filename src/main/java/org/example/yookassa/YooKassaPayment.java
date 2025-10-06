@@ -42,7 +42,6 @@ public class YooKassaPayment {
     private static final String STATUS_PENDING = "pending";
     private static final String STATUS_WAITING_FOR_CAPTURE = "waiting_for_capture";
 
-    // Максимальная сумма платежа в копейках (15 млн рублей)
     private static final BigDecimal MAX_PAYMENT_AMOUNT = new BigDecimal("15000000.00");
     private static final BigDecimal MIN_PAYMENT_AMOUNT = new BigDecimal("1.00");
 
@@ -119,7 +118,7 @@ public class YooKassaPayment {
                     throw new YooKassaException("Failed to check payment status after " + maxAttempts + " attempts", e);
                 }
                 try {
-                    Thread.sleep(delay * attempt); // Экспоненциальная задержка
+                    Thread.sleep(delay * attempt);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
                     throw new YooKassaException("Interrupted during retry", ie);
@@ -166,7 +165,6 @@ public class YooKassaPayment {
         }
     }
 
-    // Приватные методы для построения запросов
 
     private Map<String, Object> buildCreatePaymentRequest(BigDecimal amount, String description) {
         Map<String, Object> requestMap = new HashMap<>();
@@ -224,7 +222,6 @@ public class YooKassaPayment {
         }
     }
 
-    // Методы парсинга ответов
 
     private String parseCreatePaymentResponse(String responseBody) throws JsonProcessingException {
         JsonNode rootNode = objectMapper.readTree(responseBody);
@@ -270,8 +267,6 @@ public class YooKassaPayment {
         }
     }
 
-    // Валидационные методы
-
     private void validatePaymentAmount(BigDecimal amount) {
         if (amount == null) {
             throw new IllegalArgumentException("Payment amount cannot be null");
@@ -304,8 +299,6 @@ public class YooKassaPayment {
         }
     }
 
-    // Вспомогательные методы
-
     private String generateIdempotenceKey() {
         return UUID.randomUUID().toString();
     }
@@ -327,11 +320,8 @@ public class YooKassaPayment {
 
     private RestTemplate createConfiguredRestTemplate() {
         RestTemplate restTemplate = new RestTemplate();
-        // Можно добавить настройки таймаутов, если потребуется
         return restTemplate;
     }
-
-    // Внутренние классы для типизированных результатов
 
     public enum PaymentStatus {
         PENDING("pending"),

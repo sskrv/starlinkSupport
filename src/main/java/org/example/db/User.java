@@ -1,19 +1,18 @@
 package org.example.db;
 
 import jakarta.persistence.*;
-import java.time.LocalDateTime; // Импортируем правильный тип для даты и времени
+import java.time.LocalDateTime;
 
 @Entity
 @Table(name = "users")
 public class User {
     @Id
-    private Long id; // ID пользователя из Telegram
+    private Long id;
 
     @Column(name = "user_phone")
     private String phone;
 
-    // 💡 Заменили String на LocalDateTime для удобной работы с датами
-    @Column(name = "subscription_expiry_date") // Дали полю осмысленное имя
+    @Column(name = "subscription_expiry_date")
     private LocalDateTime subscriptionExpiryDate;
 
     public User() {}
