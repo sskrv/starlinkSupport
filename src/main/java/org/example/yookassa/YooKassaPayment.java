@@ -8,6 +8,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.*;
+import org.springframework.retry.annotation.Backoff;
+import org.springframework.retry.annotation.Retryable;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.HttpServerErrorException;
@@ -20,7 +22,6 @@ import jakarta.validation.constraints.Positive;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
@@ -89,47 +90,36 @@ public class YooKassaPayment {
     }
 
     /**
-     * Проверяет статус платежа по его идентификатору с повторными попытками.
+     * Проверяет статус платежа по его идентификатору с автоматическими повторными попытками.
      *
      * @param paymentId идентификатор платежа (не должен быть пустым)
      * @return статус платежа
      * @throws YooKassaException при ошибках API или валидации
      */
+    @Retryable(
+            retryFor = {ResourceAccessException.class},
+            maxAttempts = 3,
+            backoff = @Backoff(delay = 1000, multiplier = 2)
+    )
     public PaymentStatus checkPaymentStatus(@NotBlank String paymentId) {
         validatePaymentId(paymentId);
 
         logger.info("Checking status for payment ID: {}", maskSensitiveData(paymentId));
 
-        int maxAttempts = 3;
-        long delay = 1000; // 1 секунда
+        try {
+            HttpEntity<?> requestEntity = createRequestEntity(null, null);
+            String url = YOOKASSA_API_URL + "/" + paymentId;
 
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                HttpEntity<?> requestEntity = createRequestEntity(null, null);
-                String url = YOOKASSA_API_URL + "/" + paymentId;
+            ResponseEntity<String> response = executeRequest(url, HttpMethod.GET, requestEntity);
+            return parsePaymentStatusResponse(response.getBody(), paymentId);
 
-                ResponseEntity<String> response = executeRequest(url, HttpMethod.GET, requestEntity);
-                return parsePaymentStatusResponse(response.getBody(), paymentId);
-
-            } catch (ResourceAccessException e) {
-                logger.warn("Network error on attempt {} of {}: {}", attempt, maxAttempts, e.getMessage());
-                if (attempt == maxAttempts) {
-                    logger.error("All retry attempts failed for payment status check", e);
-                    throw new YooKassaException("Failed to check payment status after " + maxAttempts + " attempts", e);
-                }
-                try {
-                    Thread.sleep(delay * attempt);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new YooKassaException("Interrupted during retry", ie);
-                }
-            } catch (Exception e) {
-                logger.error("Failed to check payment status for ID: {}", maskSensitiveData(paymentId), e);
-                throw new YooKassaException("Failed to check payment status", e);
-            }
+        } catch (ResourceAccessException e) {
+            logger.warn("Network error during payment status check: {}", e.getMessage());
+            throw e; // Пробросим исключение для retry
+        } catch (Exception e) {
+            logger.error("Failed to check payment status for ID: {}", maskSensitiveData(paymentId), e);
+            throw new YooKassaException("Failed to check payment status", e);
         }
-
-        throw new YooKassaException("Unexpected end of retry loop");
     }
 
     /**
@@ -218,7 +208,7 @@ public class YooKassaPayment {
             throw new YooKassaException("YooKassa API error: " + e.getStatusCode(), e);
         } catch (ResourceAccessException e) {
             logger.error("Network error during YooKassa API call", e);
-            throw new YooKassaException("Network error calling YooKassa API", e);
+            throw e; // Пробрасываем для возможности retry
         }
     }
 
@@ -292,8 +282,6 @@ public class YooKassaPayment {
         if (paymentId == null || paymentId.trim().isEmpty()) {
             throw new IllegalArgumentException("Payment ID cannot be null or empty");
         }
-        // ЮKassa использует UUID v4 формат для ID платежей
-        // Формат: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx где x - любая hex цифра, y - 8,9,a,b
         if (!paymentId.matches("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) {
             throw new IllegalArgumentException("Invalid payment ID format");
         }
@@ -319,8 +307,7 @@ public class YooKassaPayment {
     }
 
     private RestTemplate createConfiguredRestTemplate() {
-        RestTemplate restTemplate = new RestTemplate();
-        return restTemplate;
+        return new RestTemplate();
     }
 
     public enum PaymentStatus {

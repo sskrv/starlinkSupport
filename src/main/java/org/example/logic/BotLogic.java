@@ -35,7 +35,8 @@ public class BotLogic extends TelegramLongPollingBot {
     private final YooKassaPayment yooKassaPayment;
     private final UserRepository userRepository;
 
-    private final Map<Long, Long> adminReplyTarget = new ConcurrentHashMap<>();
+    private record ReplyTarget(long chatId, String username) {}
+    private final Map<Long, ReplyTarget> adminReplyTarget = new ConcurrentHashMap<>();
     private final Map<Long, Boolean> waitingForCustomQuestion = new ConcurrentHashMap<>();
 
     public BotLogic(BotConfig botConfig, UserRepository userRepository, YooKassaPayment yooKassaPayment) {
@@ -90,9 +91,14 @@ public class BotLogic extends TelegramLongPollingBot {
                 adminReplyTarget.remove(adminId);
                 sendMessage(adminId, "✅ Вы вышли из режима ответа.");
             } else {
-                long targetChatId = adminReplyTarget.get(adminId);
-                sendMessage(targetChatId, "Сообщение от поддержки:\n\n" + text);
-                sendMessage(adminId, "↪️ Сообщение отправлено пользователю " + targetChatId);
+                ReplyTarget target = adminReplyTarget.get(adminId);
+                sendMessage(target.chatId(), "Сообщение от поддержки:\n\n" + text);
+
+                String userDisplay = target.username() != null && !target.username().isEmpty()
+                        ? "@" + target.username()
+                        : "ID: " + target.chatId();
+
+                sendMessage(adminId, "↪️ Сообщение отправлено пользователю " + userDisplay);
             }
             return;
         }
@@ -140,6 +146,7 @@ public class BotLogic extends TelegramLongPollingBot {
         try {
             User user = userRepository.findById(chatId).orElse(new User(chatId));
             user.setPhone(phoneNumber);
+            userRepository.save(user);
             sendMessage(chatId, "✅ Спасибо, ваш контакт сохранен!");
         } catch (Exception e) {
             logger.error("Error saving user phone number for user {}: {}", chatId, e.getMessage(), e);
@@ -155,11 +162,21 @@ public class BotLogic extends TelegramLongPollingBot {
         int messageId = update.getCallbackQuery().getMessage().getMessageId();
 
         if (isAdmin(userId) && callbackData.startsWith("reply_to:")) {
-            long targetChatId = Long.parseLong(callbackData.substring("reply_to:".length()));
-            adminReplyTarget.put(userId, targetChatId);
-            sendMessage(userId, "✅ Вы вошли в режим ответа пользователю " + targetChatId + ".\n" +
+            String[] parts = callbackData.split(":", 3);
+            long targetChatId = Long.parseLong(parts[1]);
+            String targetUsername = parts.length > 2 && !parts[2].isEmpty() ? parts[2] : null;
+
+            adminReplyTarget.put(userId, new ReplyTarget(targetChatId, targetUsername));
+
+            // Формируем читаемое имя пользователя
+            String userDisplay = targetUsername != null
+                    ? "@" + targetUsername
+                    : "ID: " + targetChatId;
+
+            sendMessage(userId, "✅ Вы вошли в режим ответа пользователю " + userDisplay + ".\n" +
                     "Все следующие сообщения будут отправлены ему.\n" +
                     "Для выхода из режима отправьте /stop.");
+
             return;
         }
 
@@ -279,8 +296,10 @@ public class BotLogic extends TelegramLongPollingBot {
                 username != null ? username : "неизвестно", userId, phone, requestText
         );
 
+        String callbackData = "reply_to:" + userId + ":" + (username != null ? username : "");
+
         InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup(
-                List.of(List.of(createButton("✍️ Ответить пользователю", "reply_to:" + userId)))
+                List.of(List.of(createButton("✍️ Ответить пользователю", callbackData)))
         );
         sendToAdmin(adminMessage, keyboard);
     }
@@ -428,10 +447,6 @@ public class BotLogic extends TelegramLongPollingBot {
         button.setText(text);
         button.setUrl(url);
         return button;
-    }
-
-    private void sendToAdmin(String text) {
-        sendToAdmin(text, null);
     }
 
     private void removeInlineKeyboard(long chatId, int messageId) {
