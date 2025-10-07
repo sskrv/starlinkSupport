@@ -31,6 +31,23 @@ import java.util.concurrent.ConcurrentHashMap;
 public class BotLogic extends TelegramLongPollingBot {
     private static final Logger logger = LoggerFactory.getLogger(BotLogic.class);
 
+    private static final String CALLBACK_REPLY_TO = "reply_to:";
+    private static final String CALLBACK_CHECK_PAYMENT = "check_payment:";
+    private static final String CALLBACK_SKIP_PHONE = "skip_phone_and_send:";
+    private static final String CALLBACK_SHARE_PHONE = "share_phone";
+    private static final String CALLBACK_BUY_DEVICE = "buy_device";
+    private static final String CALLBACK_ACTIVATE_DEVICE = "activate_device";
+    private static final String CALLBACK_BUY_SUBSCRIPTION = "buy_subscription";
+    private static final String CALLBACK_OTHER_QUESTION = "other_question";
+
+    private static final String COMMAND_START = "/start";
+    private static final String COMMAND_STOP = "/stop";
+
+    private static final String CALLBACK_DELIMITER = ":";
+
+    private static final int SUBSCRIPTION_DAYS = 30;
+    private static final long REQUEST_CONTEXT_TIMEOUT_MS = 600000;
+
     private final BotConfig botConfig;
     private final YooKassaPayment yooKassaPayment;
     private final UserRepository userRepository;
@@ -87,7 +104,7 @@ public class BotLogic extends TelegramLongPollingBot {
         String text = message.getText();
 
         if (adminReplyTarget.containsKey(adminId)) {
-            if ("/stop".equals(text)) {
+            if (COMMAND_STOP.equals(text)) {
                 adminReplyTarget.remove(adminId);
                 sendMessage(adminId, "✅ Вы вышли из режима ответа.");
             } else {
@@ -103,7 +120,7 @@ public class BotLogic extends TelegramLongPollingBot {
             return;
         }
 
-        if ("/start".equals(text)) {
+        if (COMMAND_START.equals(text)) {
             sendMessage(adminId, "Добро пожаловать, Администратор!");
         } else {
             sendMessage(adminId, "Для ответа пользователю, нажмите кнопку '✍️ Ответить' под его сообщением.");
@@ -115,13 +132,12 @@ public class BotLogic extends TelegramLongPollingBot {
         String text = message.getText();
 
         if (waitingForCustomQuestion.getOrDefault(chatId, false)) {
-            if ("/start".equals(text)) {
+            if (COMMAND_START.equals(text)) {
                 waitingForCustomQuestion.remove(chatId);
                 showMainMenu(chatId, "Добро пожаловать! По какому вопросу обращаетесь?");
                 return;
             }
 
-            // Обрабатываем кастомный вопрос
             waitingForCustomQuestion.remove(chatId);
             String username = message.getFrom().getUserName();
             String requestText = String.format("❓ Вопрос от пользователя:\n\n\"%s\"", text);
@@ -129,7 +145,7 @@ public class BotLogic extends TelegramLongPollingBot {
             return;
         }
 
-        if ("/start".equals(text)) {
+        if (COMMAND_START.equals(text)) {
             showMainMenu(chatId, "Добро пожаловать! По какому вопросу обращаетесь?");
             return;
         }
@@ -161,52 +177,22 @@ public class BotLogic extends TelegramLongPollingBot {
         String username = update.getCallbackQuery().getFrom().getUserName();
         int messageId = update.getCallbackQuery().getMessage().getMessageId();
 
-        if (isAdmin(userId) && callbackData.startsWith("reply_to:")) {
-            String[] parts = callbackData.split(":", 3);
-            long targetChatId = Long.parseLong(parts[1]);
-            String targetUsername = parts.length > 2 && !parts[2].isEmpty() ? parts[2] : null;
-
-            adminReplyTarget.put(userId, new ReplyTarget(targetChatId, targetUsername));
-
-            // Формируем читаемое имя пользователя
-            String userDisplay = targetUsername != null
-                    ? "@" + targetUsername
-                    : "ID: " + targetChatId;
-
-            sendMessage(userId, "✅ Вы вошли в режим ответа пользователю " + userDisplay + ".\n" +
-                    "Все следующие сообщения будут отправлены ему.\n" +
-                    "Для выхода из режима отправьте /stop.");
-
+        if (isAdmin(userId) && callbackData.startsWith(CALLBACK_REPLY_TO)) {
+            handleAdminReplyCallback(userId, callbackData);
             return;
         }
 
-        if (callbackData.startsWith("check_payment:")) {
-            String[] parts = callbackData.split(":");
-            if (parts.length == 3) {
-                String tariffCallback = parts[1];
-                String paymentId = parts[2];
-                Tariff purchasedTariff = Tariff.fromCallbackData(tariffCallback);
-                checkPaymentStatus(chatId, paymentId, username, purchasedTariff, messageId);
-            } else {
-                logger.warn("Received malformed check_payment callback: {}", callbackData);
-                sendMessage(chatId, "Произошла ошибка при проверке платежа. Пожалуйста, попробуйте снова.");
-            }
+        if (callbackData.startsWith(CALLBACK_CHECK_PAYMENT)) {
+            handleCheckPaymentCallback(chatId, username, messageId, callbackData);
             return;
         }
 
-        if (callbackData.startsWith("skip_phone_and_send:")) {
-            RequestContext context = pendingRequests.remove(chatId);
-            if (context != null) {
-                forwardUserActionToAdmin(chatId, context.username, context.requestText);
-                sendMessage(chatId, "Ваш запрос отправлен администратору без контактного номера. " +
-                        "Ответ будет отправлен в этом чате.");
-            } else {
-                sendMessage(chatId, "Сессия истекла. Пожалуйста, повторите ваш запрос.");
-            }
+        if (callbackData.startsWith(CALLBACK_SKIP_PHONE)) {
+            handleSkipPhoneCallback(chatId);
             return;
         }
 
-        if (callbackData.equals("share_phone")) {
+        if (CALLBACK_SHARE_PHONE.equals(callbackData)) {
             requestPhoneNumber(chatId, "📱 Поделитесь своим номером телефона для связи с поддержкой:");
             return;
         }
@@ -218,16 +204,59 @@ public class BotLogic extends TelegramLongPollingBot {
         }
 
         switch (callbackData) {
-            case "buy_device", "activate_device" -> {
-                String actionText = "buy_device".equals(callbackData) ? "Приобретение устройства" : "Активация устройства";
+            case CALLBACK_BUY_DEVICE, CALLBACK_ACTIVATE_DEVICE -> {
+                String actionText = CALLBACK_BUY_DEVICE.equals(callbackData)
+                        ? "Приобретение устройства"
+                        : "Активация устройства";
                 String requestText = String.format("❗️ Пользователь нажал на кнопку '%s'", actionText);
                 handleUserRequest(chatId, username, requestText);
             }
-            case "buy_subscription" -> showTariffOptions(chatId);
-            case "other_question" -> {
+            case CALLBACK_BUY_SUBSCRIPTION -> showTariffOptions(chatId);
+            case CALLBACK_OTHER_QUESTION -> {
                 waitingForCustomQuestion.put(chatId, true);
                 sendMessage(chatId, "📝 Введите свой вопрос и он будет отправлен администратору:");
             }
+        }
+    }
+
+    private void handleAdminReplyCallback(long userId, String callbackData) throws TelegramApiException {
+        String[] parts = callbackData.split(CALLBACK_DELIMITER, 3);
+        long targetChatId = Long.parseLong(parts[1]);
+        String targetUsername = parts.length > 2 && !parts[2].isEmpty() ? parts[2] : null;
+
+        adminReplyTarget.put(userId, new ReplyTarget(targetChatId, targetUsername));
+
+        String userDisplay = targetUsername != null
+                ? "@" + targetUsername
+                : "ID: " + targetChatId;
+
+        sendMessage(userId, "✅ Вы вошли в режим ответа пользователю " + userDisplay + ".\n" +
+                "Все следующие сообщения будут отправлены ему.\n" +
+                "Для выхода из режима отправьте /stop.");
+    }
+
+    private void handleCheckPaymentCallback(long chatId, String username, int messageId, String callbackData)
+            throws TelegramApiException {
+        String[] parts = callbackData.split(CALLBACK_DELIMITER);
+        if (parts.length == 3) {
+            String tariffCallback = parts[1];
+            String paymentId = parts[2];
+            Tariff purchasedTariff = Tariff.fromCallbackData(tariffCallback);
+            checkPaymentStatus(chatId, paymentId, username, purchasedTariff, messageId);
+        } else {
+            logger.warn("Received malformed check_payment callback: {}", callbackData);
+            sendMessage(chatId, "Произошла ошибка при проверке платежа. Пожалуйста, попробуйте снова.");
+        }
+    }
+
+    private void handleSkipPhoneCallback(long chatId) throws TelegramApiException {
+        RequestContext context = pendingRequests.remove(chatId);
+        if (context != null) {
+            forwardUserActionToAdmin(chatId, context.username, context.requestText);
+            sendMessage(chatId, "Ваш запрос отправлен администратору без контактного номера. " +
+                    "Ответ будет отправлен в этом чате.");
+        } else {
+            sendMessage(chatId, "Сессия истекла. Пожалуйста, повторите ваш запрос.");
         }
     }
 
@@ -246,15 +275,16 @@ public class BotLogic extends TelegramLongPollingBot {
         }
     }
 
-    private void showPhoneRequestOptions(long chatId, String requestText, String username) throws TelegramApiException {
+    private void showPhoneRequestOptions(long chatId, String requestText, String username)
+            throws TelegramApiException {
         SendMessage message = new SendMessage(String.valueOf(chatId),
                 "💡 Для более быстрой связи с поддержкой рекомендуем поделиться номером телефона, " +
                         "но это необязательно. Выберите один из вариантов:");
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
-        rows.add(List.of(createButton("📱 Поделиться номером", "share_phone")));
-        rows.add(List.of(createButton("⏭️ Продолжить без номера", "skip_phone_and_send:" +
-                System.currentTimeMillis())));
+        rows.add(List.of(createButton("📱 Поделиться номером", CALLBACK_SHARE_PHONE)));
+        rows.add(List.of(createButton("⏭️ Продолжить без номера",
+                CALLBACK_SKIP_PHONE + System.currentTimeMillis())));
 
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup(rows);
         message.setReplyMarkup(markup);
@@ -280,7 +310,7 @@ public class BotLogic extends TelegramLongPollingBot {
     private void saveRequestContext(long chatId, String requestText, String username) {
         pendingRequests.put(chatId, new RequestContext(requestText, username));
 
-        long cutoff = System.currentTimeMillis() - 600000; // 10 минут
+        long cutoff = System.currentTimeMillis() - REQUEST_CONTEXT_TIMEOUT_MS;
         pendingRequests.entrySet().removeIf(entry -> entry.getValue().timestamp < cutoff);
     }
 
@@ -296,25 +326,25 @@ public class BotLogic extends TelegramLongPollingBot {
                 username != null ? username : "неизвестно", userId, phone, requestText
         );
 
-        String callbackData = "reply_to:" + userId + ":" + (username != null ? username : "");
+        String callbackData = CALLBACK_REPLY_TO + userId + CALLBACK_DELIMITER +
+                (username != null ? username : "");
 
         InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup(
                 List.of(List.of(createButton("✍️ Ответить пользователю", callbackData)))
         );
         sendToAdmin(adminMessage, keyboard);
     }
-
     private void showMainMenu(long chatId, String text) throws TelegramApiException {
         SendMessage message = new SendMessage(String.valueOf(chatId), text);
         InlineKeyboardMarkup markup = new InlineKeyboardMarkup();
 
         List<List<InlineKeyboardButton>> rows = new ArrayList<>();
         rows.add(List.of(
-                createButton("Приобретение устройства", "buy_device"),
-                createButton("Активация устройства", "activate_device")
+                createButton("Приобретение устройства", CALLBACK_BUY_DEVICE),
+                createButton("Активация устройства", CALLBACK_ACTIVATE_DEVICE)
         ));
-        rows.add(List.of(createButton("Покупка подписки", "buy_subscription")));
-        rows.add(List.of(createButton("❓ Другой вопрос", "other_question")));
+        rows.add(List.of(createButton("Покупка подписки", CALLBACK_BUY_SUBSCRIPTION)));
+        rows.add(List.of(createButton("❓ Другой вопрос", CALLBACK_OTHER_QUESTION)));
 
         markup.setKeyboard(rows);
         message.setReplyMarkup(markup);
@@ -338,11 +368,16 @@ public class BotLogic extends TelegramLongPollingBot {
     private void initiatePayment(long chatId, Tariff tariff) throws TelegramApiException {
         sendMessage(chatId, "Создаем ссылку на оплату, пожалуйста, подождите...");
         try {
-            String description = String.format("Покупка тарифа: '%s' для пользователя %d", tariff.getDisplayName(), chatId);
+            String description = String.format("Покупка тарифа: '%s' для пользователя %d",
+                    tariff.getDisplayName(), chatId);
             String confirmationUrl = yooKassaPayment.createPayment(tariff.getPrice(), description);
 
             String paymentId = confirmationUrl.substring(confirmationUrl.lastIndexOf("=") + 1);
-            String checkCallbackData = String.format("check_payment:%s:%s", tariff.getCallbackData(), paymentId);
+            String checkCallbackData = String.format("%s%s%s%s",
+                    CALLBACK_CHECK_PAYMENT,
+                    tariff.getCallbackData(),
+                    CALLBACK_DELIMITER,
+                    paymentId);
 
             InlineKeyboardMarkup keyboard = new InlineKeyboardMarkup(List.of(
                     List.of(createUrlButton("🔗 Перейти к оплате", confirmationUrl)),
@@ -360,7 +395,8 @@ public class BotLogic extends TelegramLongPollingBot {
         }
     }
 
-    private void checkPaymentStatus(long chatId, String paymentId, String username, Tariff purchasedTariff, int messageId) throws TelegramApiException {
+    private void checkPaymentStatus(long chatId, String paymentId, String username,
+                                    Tariff purchasedTariff, int messageId) throws TelegramApiException {
         if (purchasedTariff == null) {
             sendMessage(chatId, "Не удалось определить оплаченный тариф. Обратитесь в поддержку.");
             return;
@@ -373,7 +409,6 @@ public class BotLogic extends TelegramLongPollingBot {
                     try {
                         User user = userRepository.findById(chatId).orElse(new User(chatId));
 
-                        final int SUBSCRIPTION_DAYS = 30;
                         LocalDateTime currentExpiry = user.getSubscriptionExpiryDate();
                         LocalDateTime newExpiry;
 
