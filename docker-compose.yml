@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: starlink-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: starlink_db
+      POSTGRES_USER: starlink_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U starlink_user -d starlink_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - starlink-network
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: starlink-bot
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      BOT_TOKEN: ${BOT_TOKEN}
+      BOT_USERNAME: ${BOT_USERNAME}
+      BOT_ADMIN_ID: ${BOT_ADMIN_ID}
+
+      YOOKASSA_SHOP_ID: ${YOOKASSA_SHOP_ID}
+      YOOKASSA_SECRET_KEY: ${YOOKASSA_SECRET_KEY}
+      YOOKASSA_RETURN_URL: ${YOOKASSA_RETURN_URL}
+
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/starlink_db
+      SPRING_DATASOURCE_USERNAME: starlink_user
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-secure_password_change_me}
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.PostgreSQLDialect
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+
+      JAVA_OPTS: "-Xmx512m -Xms256m"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - starlink-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  starlink-network:
+    driver: bridge

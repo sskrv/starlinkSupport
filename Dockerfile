@@ -1,23 +1,19 @@
-# Используем образ Maven для сборки
 FROM maven:3.8.8-eclipse-temurin-17 AS builder
 
-# Устанавливаем рабочую директорию для сборки
 WORKDIR /build
 
-# Копируем файлы проекта в контейнер
-COPY . .
+COPY pom.xml .
 
-# Собираем проект с помощью Maven
-RUN mvn clean package
+RUN mvn dependency:go-offline -B
 
-# Используем более легкий образ для запуска
-FROM openjdk:17-jdk-slim
+COPY src ./src
 
-# Устанавливаем рабочую директорию
+RUN mvn clean package -DskipTests -B
+
+FROM eclipse-temurin:17-jre
+
 WORKDIR /app
 
-# Копируем собранный JAR из предыдущего этапа
 COPY --from=builder /build/target/*.jar app.jar
 
-# Запускаем приложение
 CMD ["java", "-jar", "app.jar"]
